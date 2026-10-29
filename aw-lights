@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Control Alienware AW-ELC (187c:0550/0551) lighting via hidraw.
+
+Only sends REPORT (0x20) and DIM (0x26) — volatile, never writes flash.
+Protocol per OpenRGB Controllers/AlienwareController.
+"""
+import argparse
+import fcntl
+import glob
+import os
+import select
+import sys
+
+REPORT_SIZE = 33
+MAX_ZONES_PER_PACKET = 25
+CMD_REPORT, CMD_DIM = 0x20, 0x26
+REPORT_FIRMWARE, REPORT_CONFIG = 0x00, 0x02
+HID_IDS = ("0003:0000187C:00000551", "0003:0000187C:00000550")
+
+
+def _ioc(nr, size):
+    return (3 << 30) | (size << 16) | (ord("H") << 8) | nr
+
+
+HIDIOCSFEATURE = _ioc(0x06, REPORT_SIZE + 1)
+HIDIOCGFEATURE = _ioc(0x07, REPORT_SIZE + 1)
+
+
+def find_device():
+    for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
+        with open(uevent) as f:
+            if any(f"HID_ID={i}" in f.read().upper() for i in HID_IDS):
+                return "/dev/" + uevent.split("/")[4]
+    sys.exit("aw-lights: AW-ELC controller not found")
+
+
+class Elc:
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDWR)
+        self.use_feature = False
+
+    def _drain(self):
+        while select.select([self.fd], [], [], 0)[0]:
+            os.read(self.fd, 64)
+
+    def _send_output(self, pkt):
+        self._drain()
+        os.write(self.fd, b"\x00" + pkt)
+        if not select.select([self.fd], [], [], 0.5)[0]:
+            return None
+        return os.read(self.fd, 64)
+
+    def _send_feature(self, pkt):
+        fcntl.ioctl(self.fd, HIDIOCSFEATURE, bytearray(b"\x00" + pkt))
+        buf = bytearray(REPORT_SIZE + 1)
+        fcntl.ioctl(self.fd, HIDIOCGFEATURE, buf)
+        return bytes(buf[1:])
+
+    def send(self, *data):
+        pkt = bytes([0x03, *data]).ljust(REPORT_SIZE, b"\x00")
+        if not self.use_feature:
+            resp = self._send_output(pkt)
+            if resp and resp[0] == 0x03:
+                return resp
+            self.use_feature = True
+        resp = self._send_feature(pkt)
+        if not resp or resp[0] != 0x03:
+            sys.exit(f"aw-lights: no valid response (got {resp!r})")
+        return resp
+
+    def config(self):
+        resp = self.send(CMD_REPORT, REPORT_CONFIG)
+        return resp[3] << 8 | resp[4], resp[5]
+
+    def dim(self, percent, zones):
+        for i in range(0, len(zones), MAX_ZONES_PER_PACKET):
+            chunk = zones[i : i + MAX_ZONES_PER_PACKET]
+            self.send(CMD_DIM, percent, len(chunk) >> 8, len(chunk) & 0xFF, *chunk)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Alienware AW-ELC lighting control")
+    p.add_argument("--dev", help="hidraw node (auto-detected by default)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("off", help="turn all lights off")
+    sub.add_parser("on", help="restore full brightness")
+    d = sub.add_parser("dim", help="dim all lights by N percent (100 = off)")
+    d.add_argument("percent", type=int, choices=range(0, 101), metavar="0-100")
+    sub.add_parser("info", help="print firmware, platform and zone count")
+    args = p.parse_args()
+
+    elc = Elc(args.dev or find_device())
+    platform, nzones = elc.config()
+    nzones = nzones or 70
+
+    if args.cmd == "info":
+        fw = elc.send(CMD_REPORT, REPORT_FIRMWARE)
+        print(f"firmware: {fw[2]}.{fw[3]}.{fw[4]}")
+        print(f"platform: 0x{platform:04x}  zones: {nzones}")
+        print(f"transport: {'feature' if elc.use_feature else 'output'} reports")
+        return
+
+    percent = {"off": 100, "on": 0}.get(args.cmd, getattr(args, "percent", None))
+    elc.dim(percent, list(range(nzones)))
+
+
+if __name__ == "__main__":
+    main()
