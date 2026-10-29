@@ -3,9 +3,9 @@ import GLib from 'gi://GLib';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import {QuickSlider, QuickToggle, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
+import {QuickSlider, SystemIndicator} from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-const ICON = 'keyboard-brightness-symbolic';
+const ICON_FILE = 'alienware-symbolic.svg';
 const SLIDER_DEBOUNCE_MS = 120;
 const RESUME_DELAY_MS = 1500;
 
@@ -59,35 +59,25 @@ class Backend {
 }
 
 class LightsController {
-    constructor(scriptPath) {
+    constructor(scriptPath, iconPath) {
         this._backend = new Backend(scriptPath);
         this._state = {on: true, brightness: 100};
         this._debounceId = 0;
         this._resumeId = 0;
 
-        this._toggle = new QuickToggle({
-            title: 'Alienware Lights',
-            iconName: ICON,
-            toggleMode: true,
+        this._slider = new QuickSlider({
+            gicon: new Gio.FileIcon({file: Gio.File.new_for_path(iconPath)}),
+            iconReactive: true,
         });
-        this._toggle.connect('clicked', () => this._setOn(this._toggle.checked));
-
-        this._slider = new QuickSlider({iconName: ICON, iconReactive: true});
         this._slider.slider.accessible_name = 'Alienware lights brightness';
         this._sliderChangedId = this._slider.slider.connect('notify::value',
             () => this._onSliderChanged());
         this._slider.connect('icon-clicked', () => this._setOn(!this._state.on));
 
-        // Separate indicators so the toggle sits in the grid while the
-        // slider spans a full row, like the built-in brightness slider.
-        this._toggleIndicator = new SystemIndicator();
-        this._toggleIndicator.quickSettingsItems.push(this._toggle);
-        this._sliderIndicator = new SystemIndicator();
-        this._sliderIndicator.quickSettingsItems.push(this._slider);
-
-        const quickSettings = Main.panel.statusArea.quickSettings;
-        quickSettings.addExternalIndicator(this._toggleIndicator);
-        quickSettings.addExternalIndicator(this._sliderIndicator, 2);
+        // The slider spans a full row, like the built-in brightness slider.
+        this._indicator = new SystemIndicator();
+        this._indicator.quickSettingsItems.push(this._slider);
+        Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator, 2);
 
         this._sleepSignalId = Gio.DBus.system.signal_subscribe(
             'org.freedesktop.login1', 'org.freedesktop.login1.Manager',
@@ -109,7 +99,7 @@ class LightsController {
         } catch (e) {
             console.error(`aw-lights state: ${e.message}`);
         }
-        if (!this._toggle)
+        if (!this._slider)
             return;
         this._syncUi();
         this._backend.request(['restore']);
@@ -127,9 +117,6 @@ class LightsController {
 
     _syncUi() {
         const {on, brightness} = this._state;
-        this._toggle.checked = on;
-        this._toggle.subtitle = on ? `${brightness}%` : 'Off';
-
         this._slider.slider.block_signal_handler(this._sliderChangedId);
         this._slider.slider.value = on ? brightness / 100 : 0;
         this._slider.slider.unblock_signal_handler(this._sliderChangedId);
@@ -148,8 +135,6 @@ class LightsController {
         this._state.on = level > 0;
         if (level > 0)
             this._state.brightness = level;
-        this._toggle.checked = this._state.on;
-        this._toggle.subtitle = this._state.on ? `${level}%` : 'Off';
 
         if (this._debounceId)
             GLib.source_remove(this._debounceId);
@@ -167,18 +152,17 @@ class LightsController {
         if (this._debounceId)
             GLib.source_remove(this._debounceId);
 
-        for (const indicator of [this._toggleIndicator, this._sliderIndicator]) {
-            indicator.quickSettingsItems.forEach(item => item.destroy());
-            indicator.destroy();
-        }
-        this._toggle = null;
+        this._indicator.quickSettingsItems.forEach(item => item.destroy());
+        this._indicator.destroy();
         this._slider = null;
     }
 }
 
 export default class AlienwareLightsExtension extends Extension {
     enable() {
-        this._controller = new LightsController(GLib.build_filenamev([this.path, 'aw-lights']));
+        this._controller = new LightsController(
+            GLib.build_filenamev([this.path, 'aw-lights']),
+            GLib.build_filenamev([this.path, ICON_FILE]));
     }
 
     disable() {

@@ -12,7 +12,7 @@ volatile REPORT and DIM commands, so nothing is written to the controller's flas
 ```
 
 This installs the `aw-lights` command to `~/.local/bin` and the **Alienware Lights** GNOME Shell
-extension (GNOME 48), which adds a toggle and a brightness slider to Quick Settings (top-right menu).
+extension (GNOME 48), which adds a brightness slider to Quick Settings (top-right menu).
 The extension re-applies your last setting at login, after unlocking and after resume from suspend.
 
 On Wayland, log out and back in after the first install, then enable it if it isn't already:

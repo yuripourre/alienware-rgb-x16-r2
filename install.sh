@@ -10,7 +10,8 @@ trap 'rm -rf "$build"' EXIT
 install -Dm755 "$repo/aw-lights" "$HOME/.local/bin/aw-lights"
 
 gnome-extensions pack "$repo/gnome-extension" \
-    --extra-source="$repo/aw-lights" --force -o "$build"
+    --extra-source="$repo/aw-lights" \
+    --extra-source="$repo/gnome-extension/alienware-symbolic.svg" --force -o "$build"
 gnome-extensions install --force "$build/$uuid.shell-extension.zip"
 
 if gnome-extensions enable "$uuid" 2>/dev/null; then
