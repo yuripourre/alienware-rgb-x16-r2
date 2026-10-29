@@ -1,0 +1,7 @@
+{
+  "uuid": "alienware-lights@yuripourre.github.com",
+  "name": "Alienware Lights",
+  "description": "Quick Settings toggle and brightness slider for Alienware AW-ELC lighting (x16 R2). Re-applies your last setting at login and after resume.",
+  "shell-version": ["48"],
+  "url": "https://github.com/yuripourre/alienware-rgb-x16-r2"
+}

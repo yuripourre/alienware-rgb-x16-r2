@@ -3,19 +3,30 @@
 
 Only sends REPORT (0x20) and DIM (0x26) — volatile, never writes flash.
 Protocol per OpenRGB Controllers/AlienwareController.
+
+The last chosen state is kept in $XDG_CONFIG_HOME/aw-lights/state.json so
+`aw-lights restore` can re-apply it after reboot or resume.
 """
 import argparse
 import fcntl
 import glob
+import json
 import os
 import select
 import sys
+import time
 
 REPORT_SIZE = 33
 MAX_ZONES_PER_PACKET = 25
 CMD_REPORT, CMD_DIM = 0x20, 0x26
 REPORT_FIRMWARE, REPORT_CONFIG = 0x00, 0x02
 HID_IDS = ("0003:0000187C:00000551", "0003:0000187C:00000550")
+STATE_FILE = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "aw-lights",
+    "state.json",
+)
+DEFAULT_STATE = {"on": True, "brightness": 100}
 
 
 def _ioc(nr, size):
@@ -26,18 +37,38 @@ HIDIOCSFEATURE = _ioc(0x06, REPORT_SIZE + 1)
 HIDIOCGFEATURE = _ioc(0x07, REPORT_SIZE + 1)
 
 
-def find_device():
-    for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
-        with open(uevent) as f:
-            if any(f"HID_ID={i}" in f.read().upper() for i in HID_IDS):
-                return "/dev/" + uevent.split("/")[4]
-    sys.exit("aw-lights: AW-ELC controller not found")
+def find_device(wait=0.0):
+    deadline = time.monotonic() + wait
+    while True:
+        for uevent in sorted(glob.glob("/sys/class/hidraw/hidraw*/device/uevent")):
+            with open(uevent) as f:
+                if any(f"HID_ID={i}" in f.read().upper() for i in HID_IDS):
+                    return "/dev/" + uevent.split("/")[4]
+        if time.monotonic() >= deadline:
+            sys.exit("aw-lights: AW-ELC controller not found")
+        time.sleep(0.5)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return {**DEFAULT_STATE, **json.load(f)}
+    except (OSError, ValueError):
+        return dict(DEFAULT_STATE)
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE_FILE)
 
 
 class Elc:
     def __init__(self, path):
         self.fd = os.open(path, os.O_RDWR)
-        self.use_feature = False
+        self.use_feature = True
 
     def _drain(self):
         while select.select([self.fd], [], [], 0)[0]:
@@ -51,19 +82,22 @@ class Elc:
         return os.read(self.fd, 64)
 
     def _send_feature(self, pkt):
-        fcntl.ioctl(self.fd, HIDIOCSFEATURE, bytearray(b"\x00" + pkt))
-        buf = bytearray(REPORT_SIZE + 1)
-        fcntl.ioctl(self.fd, HIDIOCGFEATURE, buf)
+        try:
+            fcntl.ioctl(self.fd, HIDIOCSFEATURE, bytearray(b"\x00" + pkt))
+            buf = bytearray(REPORT_SIZE + 1)
+            fcntl.ioctl(self.fd, HIDIOCGFEATURE, buf)
+        except OSError:
+            return None
         return bytes(buf[1:])
 
     def send(self, *data):
         pkt = bytes([0x03, *data]).ljust(REPORT_SIZE, b"\x00")
-        if not self.use_feature:
-            resp = self._send_output(pkt)
+        if self.use_feature:
+            resp = self._send_feature(pkt)
             if resp and resp[0] == 0x03:
                 return resp
-            self.use_feature = True
-        resp = self._send_feature(pkt)
+            self.use_feature = False
+        resp = self._send_output(pkt)
         if not resp or resp[0] != 0x03:
             sys.exit(f"aw-lights: no valid response (got {resp!r})")
         return resp
@@ -78,30 +112,58 @@ class Elc:
             self.send(CMD_DIM, percent, len(chunk) >> 8, len(chunk) & 0xFF, *chunk)
 
 
+def apply(elc, state):
+    _, nzones = elc.config()
+    dim = 100 - state["brightness"] if state["on"] else 100
+    elc.dim(dim, list(range(nzones or 70)))
+
+
 def main():
     p = argparse.ArgumentParser(description="Alienware AW-ELC lighting control")
     p.add_argument("--dev", help="hidraw node (auto-detected by default)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("off", help="turn all lights off")
-    sub.add_parser("on", help="restore full brightness")
+    sub.add_parser("on", help="turn lights on at the last brightness")
+    b = sub.add_parser("brightness", help="set brightness N percent (0 = off)")
+    b.add_argument("percent", type=int, choices=range(0, 101), metavar="0-100")
     d = sub.add_parser("dim", help="dim all lights by N percent (100 = off)")
     d.add_argument("percent", type=int, choices=range(0, 101), metavar="0-100")
+    sub.add_parser("restore", help="re-apply the last saved state")
+    sub.add_parser("state", help="print the saved state as JSON")
     sub.add_parser("info", help="print firmware, platform and zone count")
     args = p.parse_args()
 
-    elc = Elc(args.dev or find_device())
-    platform, nzones = elc.config()
-    nzones = nzones or 70
+    state = load_state()
+    if args.cmd == "state":
+        print(json.dumps(state))
+        return
+
+    # After resume the controller may take a moment to re-enumerate.
+    elc = Elc(args.dev or find_device(wait=5.0 if args.cmd == "restore" else 0.0))
 
     if args.cmd == "info":
+        platform, nzones = elc.config()
         fw = elc.send(CMD_REPORT, REPORT_FIRMWARE)
         print(f"firmware: {fw[2]}.{fw[3]}.{fw[4]}")
         print(f"platform: 0x{platform:04x}  zones: {nzones}")
         print(f"transport: {'feature' if elc.use_feature else 'output'} reports")
         return
 
-    percent = {"off": 100, "on": 0}.get(args.cmd, getattr(args, "percent", None))
-    elc.dim(percent, list(range(nzones)))
+    if args.cmd == "off":
+        state["on"] = False
+    elif args.cmd == "on":
+        state["on"] = True
+        if state["brightness"] == 0:
+            state["brightness"] = 100
+    elif args.cmd in ("brightness", "dim"):
+        level = args.percent if args.cmd == "brightness" else 100 - args.percent
+        state["on"] = level > 0
+        if level > 0:
+            state["brightness"] = level
+
+    apply(elc, state)
+    if args.cmd != "restore":
+        save_state(state)
 
 
 if __name__ == "__main__":
