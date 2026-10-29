@@ -77,7 +77,15 @@ class LightsController {
         // The slider spans a full row, like the built-in brightness slider.
         this._indicator = new SystemIndicator();
         this._indicator.quickSettingsItems.push(this._slider);
-        Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator, 2);
+        const quickSettings = Main.panel.statusArea.quickSettings;
+        quickSettings.addExternalIndicator(this._indicator, 2);
+
+        // External items are appended to the end of the grid; move ours
+        // directly below the built-in brightness slider.
+        const brightnessItem = quickSettings._brightness?.quickSettingsItems[0];
+        const grid = quickSettings.menu._grid;
+        if (brightnessItem && grid?.contains(brightnessItem))
+            grid.set_child_above_sibling(this._slider, brightnessItem);
 
         this._sleepSignalId = Gio.DBus.system.signal_subscribe(
             'org.freedesktop.login1', 'org.freedesktop.login1.Manager',
