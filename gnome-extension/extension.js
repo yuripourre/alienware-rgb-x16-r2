@@ -77,15 +77,8 @@ class LightsController {
         // The slider spans a full row, like the built-in brightness slider.
         this._indicator = new SystemIndicator();
         this._indicator.quickSettingsItems.push(this._slider);
-        const quickSettings = Main.panel.statusArea.quickSettings;
-        quickSettings.addExternalIndicator(this._indicator, 2);
-
-        // External items are appended to the end of the grid; move ours
-        // directly below the built-in brightness slider.
-        const brightnessItem = quickSettings._brightness?.quickSettingsItems[0];
-        const grid = quickSettings.menu._grid;
-        if (brightnessItem && grid?.contains(brightnessItem))
-            grid.set_child_above_sibling(this._slider, brightnessItem);
+        Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator, 2);
+        this._placeBelowBrightness();
 
         this._sleepSignalId = Gio.DBus.system.signal_subscribe(
             'org.freedesktop.login1', 'org.freedesktop.login1.Manager',
@@ -99,6 +92,37 @@ class LightsController {
 
         this._syncUi();
         this._loadState();
+    }
+
+    // Move our item directly below the built-in brightness slider. At login the
+    // shell may still be building its own items when we get enabled, and it
+    // inserts them relative to the grid's first child, which can be our slider.
+    // So wait until it has added its last item (background apps) before moving.
+    _placeBelowBrightness() {
+        const quickSettings = Main.panel.statusArea.quickSettings;
+        const grid = quickSettings.menu._grid;
+        const place = () => {
+            const lastItem = quickSettings._backgroundApps?.quickSettingsItems.at(-1);
+            if (!lastItem || !grid.contains(lastItem))
+                return false;
+            grid.set_child_above_sibling(this._slider,
+                quickSettings._brightness.quickSettingsItems[0]);
+            return true;
+        };
+
+        if (place())
+            return;
+        this._gridChildAddedId = grid.connect('child-added', () => {
+            if (place())
+                this._stopWaitingForBrightness();
+        });
+    }
+
+    _stopWaitingForBrightness() {
+        if (!this._gridChildAddedId)
+            return;
+        Main.panel.statusArea.quickSettings.menu._grid.disconnect(this._gridChildAddedId);
+        this._gridChildAddedId = 0;
     }
 
     async _loadState() {
@@ -159,6 +183,7 @@ class LightsController {
             GLib.source_remove(this._resumeId);
         if (this._debounceId)
             GLib.source_remove(this._debounceId);
+        this._stopWaitingForBrightness();
 
         this._indicator.quickSettingsItems.forEach(item => item.destroy());
         this._indicator.destroy();
